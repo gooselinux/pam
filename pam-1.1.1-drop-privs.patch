@@ -1,0 +1,814 @@
+diff -up Linux-PAM-1.1.1/libpam/include/security/_pam_dropprivs.h.drop-privs Linux-PAM-1.1.1/libpam/include/security/_pam_dropprivs.h
+--- Linux-PAM-1.1.1/libpam/include/security/_pam_dropprivs.h.drop-privs	2010-10-20 15:33:27.000000000 +0200
++++ Linux-PAM-1.1.1/libpam/include/security/_pam_dropprivs.h	2010-10-20 15:33:27.000000000 +0200
+@@ -0,0 +1,74 @@
++/*
++ * Copyright (c) 2010 Dmitry V. Levin
++ *
++ * <security/_pam_dropprivs.h>
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, and the entire permission notice in its entirety,
++ *    including the disclaimer of warranties.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. The name of the author may not be used to endorse or promote
++ *    products derived from this software without specific prior
++ *    written permission.
++ *
++ * ALTERNATIVELY, this product may be distributed under the terms of
++ * the GNU Public License, in which case the provisions of the GPL are
++ * required INSTEAD OF the above restrictions.  (This clause is
++ * necessary due to a potential bad interaction between the GPL and
++ * the restrictions contained in a BSD-style copyright.)
++ *
++ * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESS OR IMPLIED
++ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
++ * DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT,
++ * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
++ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
++ * OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef _SECURITY__PAM_DROPPRIVS_H
++#define _SECURITY__PAM_DROPPRIVS_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#include <security/_pam_types.h>
++
++struct pam_modutil_privs {
++	gid_t *grplist;
++	int number_of_groups;
++	int allocated;
++	gid_t old_gid;
++	uid_t old_uid;
++	int is_dropped;
++};
++
++#define PAM_MODUTIL_NGROUPS     64
++#define PAM_MODUTIL_DEF_PRIVS(n) \
++	gid_t n##_grplist[PAM_MODUTIL_NGROUPS]; \
++	struct pam_modutil_privs n = { n##_grplist, PAM_MODUTIL_NGROUPS, 0, -1, -1, 0 }
++
++extern int PAM_NONNULL((1,2,3))
++pam_modutil_drop_priv(pam_handle_t *pamh,
++		      struct pam_modutil_privs *p,
++		      const struct passwd *pw);
++
++extern int PAM_NONNULL((1,2))
++pam_modutil_regain_priv(pam_handle_t *pamh,
++		      struct pam_modutil_privs *p);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* _SECURITY__PAM_DROPPRIVS_H */
+diff -up Linux-PAM-1.1.1/libpam/Makefile.am.drop-privs Linux-PAM-1.1.1/libpam/Makefile.am
+--- Linux-PAM-1.1.1/libpam/Makefile.am.drop-privs	2009-11-04 15:04:49.000000000 +0100
++++ Linux-PAM-1.1.1/libpam/Makefile.am	2010-10-20 15:46:14.000000000 +0200
+@@ -18,11 +18,15 @@ include_HEADERS = include/security/_pam_
+ 	include/security/pam_ext.h include/security/pam_modutil.h
+ 
+ noinst_HEADERS = pam_prelude.h pam_private.h pam_tokens.h \
+-		pam_modutil_private.h pam_static_modules.h
++		pam_modutil_private.h pam_static_modules.h include/security/_pam_dropprivs.h
+ 
+ libpam_la_LDFLAGS = -no-undefined -version-info 82:2:82
+ libpam_la_LIBADD = @LIBAUDIT@ $(LIBPRELUDE_LIBS) @LIBDL@
+ 
++noinst_LIBRARIES = libdropprivs.a
++libdropprivs_a_SOURCES = pam_modutil_priv.c
++libdropprivs_a_CFLAGS = $(AM_CFLAGS) -fPIC
++
+ if STATIC_MODULES
+   libpam_la_LIBADD += $(shell ls ../modules/pam_*/*.lo) \
+ 	@LIBDB@ @LIBCRYPT@ @LIBNSL@ @LIBCRACK@ -lutil
+@@ -41,4 +45,4 @@ libpam_la_SOURCES = pam_account.c pam_au
+ 	pam_vprompt.c pam_syslog.c pam_dynamic.c pam_audit.c \
+ 	pam_modutil_cleanup.c pam_modutil_getpwnam.c pam_modutil_ioloop.c \
+ 	pam_modutil_getgrgid.c pam_modutil_getpwuid.c pam_modutil_getgrnam.c \
+-	pam_modutil_getspnam.c pam_modutil_getlogin.c  pam_modutil_ingroup.c
++	pam_modutil_getspnam.c pam_modutil_getlogin.c pam_modutil_ingroup.c
+diff -up Linux-PAM-1.1.1/libpam/pam_modutil_priv.c.drop-privs Linux-PAM-1.1.1/libpam/pam_modutil_priv.c
+--- Linux-PAM-1.1.1/libpam/pam_modutil_priv.c.drop-privs	2010-10-20 15:33:27.000000000 +0200
++++ Linux-PAM-1.1.1/libpam/pam_modutil_priv.c	2010-10-20 15:33:27.000000000 +0200
+@@ -0,0 +1,171 @@
++/*
++ * $Id: pam_modutil_priv.c,v 1.1 2010/10/03 21:02:07 ldv Exp $
++ *
++ * This file provides two functions:
++ * pam_modutil_drop_priv:
++ *   temporarily lower process fs privileges by switching to another uid/gid,
++ * pam_modutil_regain_priv:
++ *   regain process fs privileges lowered by pam_modutil_drop_priv().
++ */
++
++#include "pam_modutil_private.h"
++#include <security/_pam_dropprivs.h>
++#include <security/pam_ext.h>
++#include <unistd.h>
++#include <syslog.h>
++#include <pwd.h>
++#include <grp.h>
++#include <sys/fsuid.h>
++
++/*
++ * Two setfsuid() calls in a row are necessary to check
++ * whether setfsuid() succeeded or not.
++ */
++static int change_uid(uid_t uid, uid_t *save)
++{
++	uid_t tmp = setfsuid(uid);
++	if (save)
++		*save = tmp;
++	return (uid_t) setfsuid(uid) == uid ? 0 : -1;
++}
++static int change_gid(gid_t gid, gid_t *save)
++{
++	gid_t tmp = setfsgid(gid);
++	if (save)
++		*save = tmp;
++	return (gid_t) setfsgid(gid) == gid ? 0 : -1;
++}
++
++static int cleanup(struct pam_modutil_privs *p)
++{
++	if (p->allocated) {
++		p->allocated = 0;
++		free(p->grplist);
++	}
++	p->grplist = NULL;
++	p->number_of_groups = 0;
++	return -1;
++}
++
++#define PRIV_MAGIC			0x1004000a
++#define PRIV_MAGIC_DONOTHING		0xdead000a
++
++int pam_modutil_drop_priv(pam_handle_t *pamh,
++			  struct pam_modutil_privs *p,
++			  const struct passwd *pw)
++{
++	int res;
++
++	if (p->is_dropped) {
++		pam_syslog(pamh, LOG_CRIT,
++			   "pam_modutil_drop_priv: called with dropped privileges");
++		return -1;
++	}
++
++	/*
++	 * If not root, we can do nothing.
++	 * If switching to root, we have nothing to do.
++	 * That is, in both cases, we do not care.
++	 */
++	if (geteuid() != 0 || pw->pw_uid == 0) {
++		p->is_dropped = PRIV_MAGIC_DONOTHING;
++		return 0;
++	}
++
++	if (!p->grplist || p->number_of_groups <= 0) {
++		pam_syslog(pamh, LOG_CRIT,
++			   "pam_modutil_drop_priv: called without room for supplementary groups");
++		return -1;
++	}
++	res = getgroups(0, NULL);
++	if (res < 0) {
++		pam_syslog(pamh, LOG_ERR,
++			   "pam_modutil_drop_priv: getgroups failed: %m");
++		return -1;
++	}
++
++	p->allocated = 0;
++	if (res > p->number_of_groups) {
++		p->grplist = calloc(res, sizeof(gid_t));
++		if (!p->grplist) {
++			pam_syslog(pamh, LOG_ERR, "out of memory");
++			return cleanup(p);
++		}
++		p->allocated = 1;
++		p->number_of_groups = res;
++	}
++
++	res = getgroups(p->number_of_groups, p->grplist);
++	if (res < 0) {
++		pam_syslog(pamh, LOG_ERR,
++			   "pam_modutil_drop_priv: getgroups failed: %m");
++		return cleanup(p);
++	}
++
++	p->number_of_groups = res;
++
++	/*
++	 * We should care to leave process credentials in consistent state.
++	 * That is, e.g. if change_gid() succeeded but change_uid() failed,
++	 * we should try to restore old gid.
++	 */
++	if (setgroups(0, NULL)) {
++		pam_syslog(pamh, LOG_ERR,
++			   "pam_modutil_drop_priv: setgroups failed: %m");
++		return cleanup(p);
++	}
++	if (change_gid(pw->pw_gid, &p->old_gid)) {
++		pam_syslog(pamh, LOG_ERR,
++			   "pam_modutil_drop_priv: change_gid failed: %m");
++		(void) setgroups(p->number_of_groups, p->grplist);
++		return cleanup(p);
++	}
++	if (change_uid(pw->pw_uid, &p->old_uid)) {
++		pam_syslog(pamh, LOG_ERR,
++			   "pam_modutil_drop_priv: change_uid failed: %m");
++		(void) change_gid(p->old_gid, NULL);
++		(void) setgroups(p->number_of_groups, p->grplist);
++		return cleanup(p);
++	}
++
++	p->is_dropped = PRIV_MAGIC;
++	return 0;
++}
++
++int pam_modutil_regain_priv(pam_handle_t *pamh,
++			  struct pam_modutil_privs *p)
++{
++	switch (p->is_dropped) {
++		case PRIV_MAGIC_DONOTHING:
++			p->is_dropped = 0;
++			return 0;
++
++		case PRIV_MAGIC:
++			break;
++
++		default:
++			pam_syslog(pamh, LOG_CRIT,
++				   "pam_modutil_regain_priv: called with invalid state");
++			return -1;
++		}
++
++	if (change_uid(p->old_uid, NULL)) {
++		pam_syslog(pamh, LOG_ERR,
++			   "pam_modutil_regain_priv: change_uid failed: %m");
++		return cleanup(p);
++	}
++	if (change_gid(p->old_gid, NULL)) {
++		pam_syslog(pamh, LOG_ERR,
++			   "pam_modutil_regain_priv: change_gid failed: %m");
++		return cleanup(p);
++	}
++	if (setgroups(p->number_of_groups, p->grplist)) {
++		pam_syslog(pamh, LOG_ERR,
++			   "pam_modutil_regain_priv: setgroups failed: %m");
++		return cleanup(p);
++	}
++
++	p->is_dropped = 0;
++	cleanup(p);
++	return 0;
++}
+diff -up Linux-PAM-1.1.1/modules/pam_env/Makefile.am.drop-privs Linux-PAM-1.1.1/modules/pam_env/Makefile.am
+--- Linux-PAM-1.1.1/modules/pam_env/Makefile.am.drop-privs	2009-06-29 09:24:27.000000000 +0200
++++ Linux-PAM-1.1.1/modules/pam_env/Makefile.am	2010-10-20 15:33:27.000000000 +0200
+@@ -22,7 +22,7 @@ if HAVE_VERSIONING
+ endif
+ 
+ securelib_LTLIBRARIES = pam_env.la
+-pam_env_la_LIBADD = -L$(top_builddir)/libpam -lpam
++pam_env_la_LIBADD = -L$(top_builddir)/libpam -ldropprivs -lpam
+ 
+ secureconf_DATA = pam_env.conf
+ sysconf_DATA = environment
+diff -up Linux-PAM-1.1.1/modules/pam_env/pam_env.c.drop-privs Linux-PAM-1.1.1/modules/pam_env/pam_env.c
+--- Linux-PAM-1.1.1/modules/pam_env/pam_env.c.drop-privs	2009-06-29 09:24:27.000000000 +0200
++++ Linux-PAM-1.1.1/modules/pam_env/pam_env.c	2010-10-20 15:33:27.000000000 +0200
+@@ -10,7 +10,7 @@
+ #define DEFAULT_READ_ENVFILE    1
+ 
+ #define DEFAULT_USER_ENVFILE    ".pam_environment"
+-#define DEFAULT_USER_READ_ENVFILE 1
++#define DEFAULT_USER_READ_ENVFILE 0
+ 
+ #include "config.h"
+ 
+@@ -42,6 +42,7 @@
+ #include <security/pam_modutil.h>
+ #include <security/_pam_macros.h>
+ #include <security/pam_ext.h>
++#include <security/_pam_dropprivs.h>
+ 
+ /* This little structure makes it easier to keep variables together */
+ 
+@@ -772,13 +773,14 @@ handle_env (pam_handle_t *pamh, int argc
+ 
+   if(user_readenv && retval == PAM_SUCCESS) {
+     char *envpath = NULL;
+-    struct passwd *user_entry;
++    struct passwd *user_entry = NULL;
+     const char *username;
+     struct stat statbuf;
+ 
+     username = _pam_get_item_byname(pamh, "PAM_USER");
+ 
+-    user_entry = pam_modutil_getpwnam (pamh, username);
++    if (username)
++      user_entry = pam_modutil_getpwnam (pamh, username);
+     if (!user_entry) {
+       pam_syslog(pamh, LOG_ERR, "No such user!?");
+     }
+@@ -789,7 +791,15 @@ handle_env (pam_handle_t *pamh, int argc
+ 	  return PAM_BUF_ERR;
+ 	}
+       if (stat(envpath, &statbuf) == 0) {
+-        retval = _parse_config_file(pamh, envpath);
++	PAM_MODUTIL_DEF_PRIVS(privs);
++
++	if (pam_modutil_drop_priv(pamh, &privs, user_entry)) {
++	  retval = PAM_SESSION_ERR;
++	} else {
++	  retval = _parse_config_file(pamh, envpath);
++	  if (pam_modutil_regain_priv(pamh, &privs))
++	    retval = PAM_SESSION_ERR;
++	}
+         if (retval == PAM_IGNORE)
+           retval = PAM_SUCCESS;
+       }
+diff -up Linux-PAM-1.1.1/modules/pam_env/pam_env.8.xml.drop-privs Linux-PAM-1.1.1/modules/pam_env/pam_env.8.xml
+--- Linux-PAM-1.1.1/modules/pam_env/pam_env.8.xml.drop-privs	2009-06-16 09:35:09.000000000 +0200
++++ Linux-PAM-1.1.1/modules/pam_env/pam_env.8.xml	2010-10-20 15:33:27.000000000 +0200
+@@ -143,7 +143,10 @@
+         <listitem>
+           <para>
+             Turns on or off the reading of the user specific environment
+-            file. 0 is off, 1 is on. By default this option is on.
++            file. 0 is off, 1 is on. By default this option is off as user
++            supplied environment variables in the PAM environment could affect
++            behavior of subsequent modules in the stack without the consent
++            of the system administrator.
+           </para>
+         </listitem>
+       </varlistentry>
+diff -up Linux-PAM-1.1.1/modules/pam_mail/Makefile.am.drop-privs Linux-PAM-1.1.1/modules/pam_mail/Makefile.am
+--- Linux-PAM-1.1.1/modules/pam_mail/Makefile.am.drop-privs	2009-06-29 09:24:27.000000000 +0200
++++ Linux-PAM-1.1.1/modules/pam_mail/Makefile.am	2010-10-20 15:33:27.000000000 +0200
+@@ -22,7 +22,7 @@ if HAVE_VERSIONING
+ endif
+ 
+ securelib_LTLIBRARIES = pam_mail.la
+-pam_mail_la_LIBADD = -L$(top_builddir)/libpam -lpam
++pam_mail_la_LIBADD = -L$(top_builddir)/libpam -ldropprivs -lpam
+ 
+ if ENABLE_REGENERATE_MAN
+ noinst_DATA = README
+diff -up Linux-PAM-1.1.1/modules/pam_mail/pam_mail.c.drop-privs Linux-PAM-1.1.1/modules/pam_mail/pam_mail.c
+--- Linux-PAM-1.1.1/modules/pam_mail/pam_mail.c.drop-privs	2008-09-25 13:53:03.000000000 +0200
++++ Linux-PAM-1.1.1/modules/pam_mail/pam_mail.c	2010-10-20 15:33:27.000000000 +0200
+@@ -44,6 +44,7 @@
+ #include <security/_pam_macros.h>
+ #include <security/pam_modutil.h>
+ #include <security/pam_ext.h>
++#include <security/_pam_dropprivs.h>
+ 
+ /* argument parsing */
+ 
+@@ -124,29 +125,16 @@ _pam_parse (const pam_handle_t *pamh, in
+ 
+ static int
+ get_folder(pam_handle_t *pamh, int ctrl,
+-	   const char *path_mail, char **folder_p, size_t hashcount)
++	   const char *path_mail, char **folder_p, size_t hashcount,
++	   const struct passwd *pwd)
+ {
+     int retval;
+-    const char *user, *path;
++    const char *path;
+     char *folder = NULL;
+-    const struct passwd *pwd = NULL;
+-
+-    retval = pam_get_user(pamh, &user, NULL);
+-    if (retval != PAM_SUCCESS || user == NULL) {
+-	pam_syslog(pamh, LOG_ERR, "cannot determine username");
+-	retval = PAM_USER_UNKNOWN;
+-	goto get_folder_cleanup;
+-    }
+ 
+     if (ctrl & PAM_NEW_MAIL_DIR) {
+ 	path = path_mail;
+ 	if (*path == '~') {	/* support for $HOME delivery */
+-	    pwd = pam_modutil_getpwnam(pamh, user);
+-	    if (pwd == NULL) {
+-		pam_syslog(pamh, LOG_ERR, "user unknown");
+-		retval = PAM_USER_UNKNOWN;
+-		goto get_folder_cleanup;
+-	    }
+ 	    /*
+ 	     * "~/xxx" and "~xxx" are treated as same
+ 	     */
+@@ -168,18 +156,11 @@ get_folder(pam_handle_t *pamh, int ctrl,
+ 
+     /* put folder together */
+ 
+-    hashcount = hashcount < strlen(user) ? hashcount : strlen(user);
++    hashcount = hashcount < strlen(pwd->pw_name) ?
++      hashcount : strlen(pwd->pw_name);
+ 
+     retval = PAM_BUF_ERR;
+     if (ctrl & PAM_HOME_MAIL) {
+-        if (pwd == NULL) {
+-	    pwd = pam_modutil_getpwnam(pamh, user);
+-	    if (pwd == NULL) {
+-		pam_syslog(pamh, LOG_ERR, "user unknown");
+-		retval = PAM_USER_UNKNOWN;
+-		goto get_folder_cleanup;
+-	    }
+-	}
+ 	if (asprintf(&folder, MAIL_FILE_FORMAT, pwd->pw_dir, "", path) < 0)
+ 	    goto get_folder_cleanup;
+     } else {
+@@ -192,11 +173,11 @@ get_folder(pam_handle_t *pamh, int ctrl,
+ 
+ 	for (i = 0; i < hashcount; i++) {
+ 	    hash[2 * i] = '/';
+-	    hash[2 * i + 1] = user[i];
++	    hash[2 * i + 1] = pwd->pw_name[i];
+ 	}
+ 	hash[2 * i] = '\0';
+ 
+-	rc = asprintf(&folder, MAIL_FILE_FORMAT, path, hash, user);
++	rc = asprintf(&folder, MAIL_FILE_FORMAT, path, hash, pwd->pw_name);
+ 	_pam_overwrite(hash);
+ 	_pam_drop(hash);
+ 	if (rc < 0)
+@@ -208,7 +189,6 @@ get_folder(pam_handle_t *pamh, int ctrl,
+     /* tidy up */
+ 
+   get_folder_cleanup:
+-    user = NULL;
+     path = NULL;
+ 
+     *folder_p = folder;
+@@ -402,7 +382,9 @@ static int _do_mail(pam_handle_t *pamh, 
+     int retval, ctrl, type;
+     size_t hashcount;
+     char *folder = NULL;
++    const char *user;
+     const char *path_mail = NULL;
++    const struct passwd *pwd = NULL;
+ 
+     /*
+      * this module (un)sets the MAIL environment variable, and checks if
+@@ -411,9 +393,21 @@ static int _do_mail(pam_handle_t *pamh, 
+ 
+     ctrl = _pam_parse(pamh, flags, argc, argv, &path_mail, &hashcount);
+ 
++    retval = pam_get_user(pamh, &user, NULL);
++    if (retval != PAM_SUCCESS || user == NULL) {
++	pam_syslog(pamh, LOG_ERR, "cannot determine username");
++	return PAM_USER_UNKNOWN;
++    }
++
++    pwd = pam_modutil_getpwnam (pamh, user);
++    if (pwd == NULL) {
++        pam_syslog(pamh, LOG_ERR, "user unknown");
++        return PAM_USER_UNKNOWN;
++    }
++
+     /* which folder? */
+ 
+-    retval = get_folder(pamh, ctrl, path_mail, &folder, hashcount);
++    retval = get_folder(pamh, ctrl, path_mail, &folder, hashcount, pwd);
+     if (retval != PAM_SUCCESS) {
+ 	D(("failed to find folder"));
+ 	return retval;
+@@ -450,7 +444,19 @@ static int _do_mail(pam_handle_t *pamh, 
+ 
+     if ((est && !(ctrl & PAM_NO_LOGIN))
+ 	|| (!est && (ctrl & PAM_LOGOUT_TOO))) {
+-	type = get_mail_status(pamh, ctrl, folder);
++	PAM_MODUTIL_DEF_PRIVS(privs);
++
++	if (pam_modutil_drop_priv(pamh, &privs, pwd)) {
++	  retval = PAM_SESSION_ERR;
++	  goto do_mail_cleanup;
++	} else {
++	  type = get_mail_status(pamh, ctrl, folder);
++	  if (pam_modutil_regain_priv(pamh, &privs)) {
++	    retval = PAM_SESSION_ERR;
++	    goto do_mail_cleanup;
++	  }
++	}
++
+ 	if (type != 0) {
+ 	    retval = report_mail(pamh, ctrl, type, folder);
+ 	    type = 0;
+diff -up Linux-PAM-1.1.1/modules/pam_xauth/Makefile.am.drop-privs Linux-PAM-1.1.1/modules/pam_xauth/Makefile.am
+--- Linux-PAM-1.1.1/modules/pam_xauth/Makefile.am.drop-privs	2009-11-04 13:04:53.000000000 +0100
++++ Linux-PAM-1.1.1/modules/pam_xauth/Makefile.am	2010-10-20 15:33:27.000000000 +0200
+@@ -17,7 +17,7 @@ secureconfdir = $(SCONFIGDIR)
+ 
+ AM_CFLAGS = -I$(top_srcdir)/libpam/include -I$(top_srcdir)/libpamc/include
+ AM_LDFLAGS = -no-undefined -avoid-version -module \
+-	-L$(top_builddir)/libpam -lpam @LIBSELINUX@
++	-L$(top_builddir)/libpam -ldropprivs -lpam @LIBSELINUX@
+ if HAVE_VERSIONING
+   AM_LDFLAGS += -Wl,--version-script=$(srcdir)/../modules.map
+ endif
+diff -up Linux-PAM-1.1.1/modules/pam_xauth/pam_xauth.c.drop-privs Linux-PAM-1.1.1/modules/pam_xauth/pam_xauth.c
+--- Linux-PAM-1.1.1/modules/pam_xauth/pam_xauth.c.drop-privs	2009-11-04 13:04:53.000000000 +0100
++++ Linux-PAM-1.1.1/modules/pam_xauth/pam_xauth.c	2010-10-20 15:33:27.000000000 +0200
+@@ -35,8 +35,10 @@
+ 
+ #include "config.h"
+ #include <sys/types.h>
+-#include <sys/fsuid.h>
+ #include <sys/wait.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++#include <unistd.h>
+ #include <errno.h>
+ #include <fnmatch.h>
+ #include <grp.h>
+@@ -56,6 +58,7 @@
+ #include <security/_pam_macros.h>
+ #include <security/pam_modutil.h>
+ #include <security/pam_ext.h>
++#include <security/_pam_dropprivs.h>
+ 
+ #ifdef WITH_SELINUX
+ #include <selinux/selinux.h>
+@@ -87,7 +90,7 @@ static const char * const xauthpaths[] =
+ /* Run a given command (with a NULL-terminated argument list), feeding it the
+  * given input on stdin, and storing any output it generates. */
+ static int
+-run_coprocess(const char *input, char **output,
++run_coprocess(pam_handle_t *pamh, const char *input, char **output,
+ 	      uid_t uid, gid_t gid, const char *command, ...)
+ {
+ 	int ipipe[2], opipe[2], i;
+@@ -126,9 +129,26 @@ run_coprocess(const char *input, char **
+ 		const char *tmp;
+ 		int maxopened;
+ 		/* Drop privileges. */
+-		setgid(gid);
+-		setgroups(0, NULL);
+-		setuid(uid);
++		if (setgid(gid) == -1)
++		  {
++		    int err = errno;
++		    pam_syslog (pamh, LOG_ERR, "setgid(%lu) failed: %m",
++				(unsigned long) getegid ());
++		    _exit (err);
++		  }
++		if (setgroups(0, NULL) == -1)
++		  {
++		    int err = errno;
++		    pam_syslog (pamh, LOG_ERR, "setgroups() failed: %m");
++		    _exit (err);
++		  }
++		if (setuid(uid) == -1)
++		  {
++		    int err = errno;
++		    pam_syslog (pamh, LOG_ERR, "setuid(%lu) failed: %m",
++				(unsigned long) geteuid ());
++		    _exit (err);
++		  }
+ 		/* Initialize the argument list. */
+ 		memset(args, 0, sizeof(args));
+ 		/* Set the pipe descriptors up as stdin and stdout, and close
+@@ -215,9 +235,11 @@ check_acl(pam_handle_t *pamh,
+ {
+ 	char path[PATH_MAX];
+ 	struct passwd *pwd;
+-	FILE *fp;
+-	int i;
+-	uid_t euid;
++	FILE *fp = NULL;
++	int i, fd = -1, save_errno;
++	struct stat st;
++	PAM_MODUTIL_DEF_PRIVS(privs);
++
+ 	/* Check this user's <sense> file. */
+ 	pwd = pam_modutil_getpwnam(pamh, this_user);
+ 	if (pwd == NULL) {
+@@ -233,11 +255,33 @@ check_acl(pam_handle_t *pamh,
+ 			   "name of user's home directory is too long");
+ 		return PAM_SESSION_ERR;
+ 	}
+-	euid = geteuid();
+-	setfsuid(pwd->pw_uid);
+-	fp = fopen(path, "r");
+-	setfsuid(euid);
+-	if (fp != NULL) {
++	if (pam_modutil_drop_priv(pamh, &privs, pwd))
++		return PAM_SESSION_ERR;
++	if (!stat(path, &st)) {
++		if (!S_ISREG(st.st_mode))
++			errno = EINVAL;
++		else
++			fd = open(path, O_RDONLY | O_NOCTTY);
++	}
++	save_errno = errno;
++	if (pam_modutil_regain_priv(pamh, &privs)) {
++		if (fd >= 0)
++			close(fd);
++		return PAM_SESSION_ERR;
++	}
++	if (fd >= 0) {
++		if (!fstat(fd, &st)) {
++			if (!S_ISREG(st.st_mode))
++				errno = EINVAL;
++			else
++				fp = fdopen(fd, "r");
++		}
++		if (!fp) {
++			save_errno = errno;
++			close(fd);
++		}
++	}
++	if (fp) {
+ 		char buf[LINE_MAX], *tmp;
+ 		/* Scan the file for a list of specs of users to "trust". */
+ 		while (fgets(buf, sizeof(buf), fp) != NULL) {
+@@ -268,6 +312,7 @@ check_acl(pam_handle_t *pamh,
+ 		return PAM_PERM_DENIED;
+ 	} else {
+ 		/* Default to okay if the file doesn't exist. */
++	        errno = save_errno;
+ 		switch (errno) {
+ 		case ENOENT:
+ 			if (noent_code == PAM_SUCCESS) {
+@@ -305,7 +350,7 @@ pam_sm_open_session (pam_handle_t *pamh,
+ 	struct passwd *tpwd, *rpwd;
+ 	int fd, i, debug = 0;
+ 	int retval = PAM_SUCCESS;
+-	uid_t systemuser = 499, targetuser = 0, euid;
++	uid_t systemuser = 499, targetuser = 0;
+ 
+ 	/* Parse arguments.  We don't understand many, so no sense in breaking
+ 	 * this into a separate function. */
+@@ -463,14 +508,15 @@ pam_sm_open_session (pam_handle_t *pamh,
+ 			   xauth, "-f", cookiefile, "nlist", display,
+ 			   (unsigned long) getuid(), (unsigned long) getgid());
+ 	}
+-	if (run_coprocess(NULL, &cookie,
++	if (run_coprocess(pamh, NULL, &cookie,
+ 			  getuid(), getgid(),
+ 			  xauth, "-f", cookiefile, "nlist", display,
+ 			  NULL) == 0) {
+-		int save_errno;
+ #ifdef WITH_SELINUX
+ 		security_context_t context = NULL;
+ #endif
++		PAM_MODUTIL_DEF_PRIVS(privs);
++
+ 		/* Check that we got a cookie.  If not, we get creative. */
+ 		if (((cookie == NULL) || (strlen(cookie) == 0)) &&
+ 		    ((strncmp(display, "localhost:", 10) == 0) ||
+@@ -521,7 +567,7 @@ pam_sm_open_session (pam_handle_t *pamh,
+ 						       (unsigned long) getuid(),
+ 						       (unsigned long) getgid());
+ 					}
+-					run_coprocess(NULL, &cookie,
++					run_coprocess(pamh, NULL, &cookie,
+ 						      getuid(), getgid(),
+ 						      xauth, "-f", cookiefile,
+ 						      "nlist", t, NULL);
+@@ -553,9 +599,10 @@ pam_sm_open_session (pam_handle_t *pamh,
+ 		}
+ 
+ 		/* Generate a new file to hold the data. */
+-		euid = geteuid();
+-		setfsuid(tpwd->pw_uid);
+-		
++		if (pam_modutil_drop_priv(pamh, &privs, tpwd)) {
++			retval = PAM_SESSION_ERR;
++			goto cleanup;
++		}
+ #ifdef WITH_SELINUX
+ 		if (is_selinux_enabled() > 0) {
+ 			struct selabel_handle *ctx = selabel_open(SELABEL_CTX_FILE, NULL, 0);
+@@ -573,31 +620,24 @@ pam_sm_open_session (pam_handle_t *pamh,
+ 				}
+ 			}
+ 		}
++#endif /* WITH_SELINUX */
+ 		fd = mkstemp(xauthority + sizeof(XAUTHENV));
+-		save_errno = errno;
++		if (fd < 0)
++			pam_syslog(pamh, LOG_ERR,
++				   "error creating temporary file `%s': %m",
++				   xauthority + sizeof(XAUTHENV));
++#ifdef WITH_SELINUX
+ 		if (context != NULL) {
+ 			free(context);
+ 			setfscreatecon(NULL);
+ 		}
+-#else
+-		fd = mkstemp(xauthority + sizeof(XAUTHENV));
+-		save_errno = errno;
+-#endif
+-
+-		setfsuid(euid);
+-		if (fd == -1) {
+-			errno = save_errno;
+-			pam_syslog(pamh, LOG_ERR,
+-				   "error creating temporary file `%s': %m",
+-				   xauthority + sizeof(XAUTHENV));
++#endif /* WITH_SELINUX */
++		if (fd >= 0)
++			close(fd);
++		if (pam_modutil_regain_priv(pamh, &privs) || fd < 0) {
+ 			retval = PAM_SESSION_ERR;
+ 			goto cleanup;
+ 		}
+-		/* Set permissions on the new file and dispose of the
+-		 * descriptor. */
+-		if (fchown(fd, tpwd->pw_uid, tpwd->pw_gid) < 0)
+-		  pam_syslog (pamh, LOG_ERR, "fchown: %m");
+-		close(fd);
+ 
+ 		/* Get a copy of the filename to save as a data item for
+ 		 * removal at session-close time. */
+@@ -669,7 +709,7 @@ pam_sm_open_session (pam_handle_t *pamh,
+ 				  (unsigned long) tpwd->pw_uid,
+ 				  (unsigned long) tpwd->pw_gid);
+ 		}
+-		run_coprocess(cookie, &tmp,
++		run_coprocess(pamh, cookie, &tmp,
+ 			      tpwd->pw_uid, tpwd->pw_gid,
+ 			      xauth, "-f", cookiefile, "nmerge", "-", NULL);
+ 
+@@ -691,11 +731,21 @@ int
+ pam_sm_close_session (pam_handle_t *pamh, int flags UNUSED,
+ 		      int argc, const char **argv)
+ {
+-	void *cookiefile;
+ 	int i, debug = 0;
++	const char *user;
++	const void *data;
++	const char *cookiefile;
++	struct passwd *tpwd;
++	PAM_MODUTIL_DEF_PRIVS(privs);
++
++	/* Try to retrieve the name of a file we created when
++	 * the session was opened. */
++	if (pam_get_data(pamh, DATANAME, &data) != PAM_SUCCESS)
++		return PAM_SUCCESS;
++	cookiefile = data;
+ 
+-	/* Parse arguments.  We don't understand many, so no sense in breaking
+-	 * this into a separate function. */
++	/* Parse arguments.  We don't understand many, so
++	 * no sense in breaking this into a separate function. */
+ 	for (i = 0; i < argc; i++) {
+ 		if (strcmp(argv[i], "debug") == 0) {
+ 			debug = 1;
+@@ -714,19 +764,26 @@ pam_sm_close_session (pam_handle_t *pamh
+ 		       argv[i]);
+ 	}
+ 
+-	/* Try to retrieve the name of a file we created when the session was
+-	 * opened. */
+-	if (pam_get_data(pamh, DATANAME, (const void**) &cookiefile) == PAM_SUCCESS) {
+-		/* We'll only try to remove the file once. */
+-		if (strlen((char*)cookiefile) > 0) {
+-			if (debug) {
+-				pam_syslog(pamh, LOG_DEBUG, "removing `%s'",
+-				       (char*)cookiefile);
+-			}
+-			unlink((char*)cookiefile);
+-			*((char*)cookiefile) = '\0';
+-		}
++	if (pam_get_user(pamh, &user, NULL) != PAM_SUCCESS) {
++		pam_syslog(pamh, LOG_ERR,
++			   "error determining target user's name");
++		return PAM_SESSION_ERR;
++	}
++	if (!(tpwd = pam_modutil_getpwnam(pamh, user))) {
++		pam_syslog(pamh, LOG_ERR,
++			   "error determining target user's UID");
++		return PAM_SESSION_ERR;
+ 	}
++
++	if (debug)
++		pam_syslog(pamh, LOG_DEBUG, "removing `%s'", cookiefile);
++	if (pam_modutil_drop_priv(pamh, &privs, tpwd))
++		return PAM_SESSION_ERR;
++	if (unlink(cookiefile) == -1 && errno != ENOENT)
++	  pam_syslog(pamh, LOG_WARNING, "Couldn't remove `%s': %m", cookiefile);
++	if (pam_modutil_regain_priv(pamh, &privs))
++		return PAM_SESSION_ERR;
++
+ 	return PAM_SUCCESS;
+ }
+ 
